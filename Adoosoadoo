@@ -1,0 +1,121 @@
+import asyncio
+import requests
+import pandas as pd
+import solana.publickey
+from solana.rpc.async_api import AsyncClient
+from solana.rpc.types import TxOpts
+from solana.transaction import Transaction
+from solana.publickey import PublicKey
+from solana.account import Account
+from pyserum.market import Market
+from pyserum.async_client import AsyncClient as SerumAsyncClient
+from pyserum.constants import TAKER_SIDE_BUY, TAKER_SIDE_SELL
+from pyserum.utils import decimal_to_native
+
+# Configuration Variables
+API_KEY_TWITTERSCORE = "your_api_key_here"  # Replace with your TwitterScore API key
+SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+SERUM_MARKET_ADDRESS = PublicKey("YOUR_SERUM_MARKET_ADDRESS_HERE")  # Replace with actual market address
+TOKEN_MINT_ADDRESS = PublicKey("YOUR_TOKEN_MINT_ADDRESS_HERE")  # Replace with actual token mint address
+WALLET_PRIVATE_KEY = "YOUR_WALLET_PRIVATE_KEY_HERE"  # Replace with your wallet's private key
+
+# Trading Variables
+SLIPPAGE = 0.01  # 1% slippage
+TAKE_PROFIT = 0.02  # 2% take profit
+SOL_BUY_AMOUNT = 1.0  # Amount of SOL to use for buying assets
+
+# Initialize the Solana and Serum clients
+solana_client = AsyncClient(SOLANA_RPC_URL)
+serum_client = SerumAsyncClient(SOLANA_RPC_URL)
+wallet = Account(bytes.fromhex(WALLET_PRIVATE_KEY))
+
+
+# Audience Data Retrieval Function
+def get_audience_data(account_handle):
+    """Retrieve audience analysis data for a given Twitter account."""
+    try:
+        response = requests.get(
+            f"https://api.twitterscore.io/audience?handle={account_handle}&apikey={API_KEY_TWITTERSCORE}"
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("status") == "success":
+            return data.get("audience_data")
+        else:
+            print("Error in response:", data.get("error", "Unknown error"))
+            return None
+    except Exception as e:
+        print(f"Error retrieving audience data for {account_handle}: {e}")
+        return None
+
+
+# Trading Functions
+async def buy_token(market: Market, amount: float):
+    """Function to buy tokens."""
+    price = await market.load_bids()  # Load current bid price
+    if price:
+        slippage_adjusted_price = price[0].price * (1 + SLIPPAGE)
+        native_amount = decimal_to_native(amount, market.base_decimals)
+        transaction = Transaction()
+        transaction.add(
+            await market.make_order(
+                owner=wallet.public_key,
+                side=TAKER_SIDE_BUY,
+                price=slippage_adjusted_price,
+                size=native_amount,
+                order_type='limit',
+            )
+        )
+        response = await solana_client.send_transaction(transaction, wallet, opts=TxOpts(skip_preflight=True))
+        print(f"Buy order placed: {response['result']}")
+    else:
+        print("Unable to fetch price for buy.")
+
+
+async def sell_token(market: Market, amount: float):
+    """Function to sell tokens."""
+    price = await market.load_asks()  # Load current ask price
+    if price:
+        take_profit_price = price[0].price * (1 + TAKE_PROFIT)
+        native_amount = decimal_to_native(amount, market.base_decimals)
+        transaction = Transaction()
+        transaction.add(
+            await market.make_order(
+                owner=wallet.public_key,
+                side=TAKER_SIDE_SELL,
+                price=take_profit_price,
+                size=native_amount,
+                order_type='limit',
+            )
+        )
+        response = await solana_client.send_transaction(transaction, wallet, opts=TxOpts(skip_preflight=True))
+        print(f"Sell order placed: {response['result']}")
+    else:
+        print("Unable to fetch price for sell.")
+
+
+async def main():
+    """Main function to execute the buy and sell bot."""
+    # Twitter account analysis
+    twitter_handle = "example_handle"  # Replace with the Twitter handle of interest
+    audience_data = get_audience_data(twitter_handle)
+
+    if audience_data:
+        df = pd.DataFrame(audience_data)
+        # Here, you can analyze the data as needed
+        print("Audience Data Retrieved:")
+        print(df.head())  # Display the first few rows of audience data
+
+        # Execute Trading
+        market = await Market.load(serum_client, SERUM_MARKET_ADDRESS)
+        amount_to_buy = SOL_BUY_AMOUNT / (await market.load_bids())[0].price  # Calculate how much token to buy
+        await buy_token(market, amount_to_buy)  # Buy token
+        await asyncio.sleep(5)  # Wait some time before selling
+        await sell_token(market, amount_to_buy)  # Sell token
+    else:
+        print("No audience data available.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
